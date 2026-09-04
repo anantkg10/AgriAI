@@ -2,8 +2,11 @@ import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
 import { ScanResult, Severity, Article } from '../types';
 
 const initializeAi = (): GoogleGenAI | null => {
-    // API key is hardcoded for local development as requested.
-    const apiKey = "AIzaSyCeNeEKegg8ZgIkBlzcjto2okJZkRQMTis";
+    // API key is hardcoded directly without requiring any environment variable
+    const hardcodedApiKey = "AIzaSyCeNeEKegg8ZgIkBlzcjto2okJZkRQMTis";
+    const apiKey = (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'PLACEHOLDER_API_KEY')
+        ? process.env.GEMINI_API_KEY
+        : hardcodedApiKey;
 
     if (!apiKey) {
         console.error("CRITICAL: API_KEY is missing from the source code. AI features will be disabled.");
