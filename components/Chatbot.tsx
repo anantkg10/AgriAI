@@ -20,25 +20,25 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, setIsOpen }) => {
     
     useEffect(() => {
         if (isOpen) {
-            if (!ai) {
-                setMessages([{ role: 'model', text: t('chatbotOfflineMessage') }]);
-                return;
+            const systemInstruction = t('chatbotSystemInstruction', { language: languageName });
+            if (ai) {
+                try {
+                    const newChat = ai.chats.create({
+                        model: 'gemini-3.1-flash-lite',
+                        config: {
+                            systemInstruction,
+                            thinkingConfig: { thinkingBudget: 0 }
+                        },
+                    });
+                    chatRef.current = newChat;
+                } catch (error) {
+                    console.warn("Client chat init failed, using server fallback:", error);
+                    chatRef.current = null;
+                }
+            } else {
+                chatRef.current = null;
             }
-            try {
-                const systemInstruction = t('chatbotSystemInstruction', { language: languageName });
-                const newChat = ai.chats.create({
-                    model: 'gemini-3.1-flash-lite',
-                    config: {
-                        systemInstruction,
-                        thinkingConfig: { thinkingBudget: 0 }
-                    },
-                });
-                chatRef.current = newChat;
-                setMessages([]);
-            } catch (error) {
-                console.error("Failed to initialize chat:", error);
-                setMessages([{ role: 'model', text: t('chatbotConnectionError') }]);
-            }
+            setMessages([]);
         } else {
             setMessages([]);
             setInput('');
@@ -53,7 +53,7 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, setIsOpen }) => {
 
     const handleSend = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!input.trim() || isLoading || !chatRef.current) return;
+        if (!input.trim() || isLoading) return;
 
         const userMessage: TranscriptMessage = { role: 'user', text: input };
         setMessages(prev => [...prev, userMessage]);
@@ -62,25 +62,45 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, setIsOpen }) => {
         setIsLoading(true);
 
         try {
-            const result: AsyncGenerator<GenerateContentResponse> = await chatRef.current.sendMessageStream({ message: currentInput });
-            let modelResponse = '';
-            setMessages(prev => [...prev, { role: 'model', text: '...' }]);
+            if (chatRef.current) {
+                const result: AsyncGenerator<GenerateContentResponse> = await chatRef.current.sendMessageStream({ message: currentInput });
+                let modelResponse = '';
+                setMessages(prev => [...prev, { role: 'model', text: '...' }]);
 
-            for await (const chunk of result) {
-                modelResponse += chunk.text;
+                for await (const chunk of result) {
+                    modelResponse += chunk.text;
+                    setMessages(prev => {
+                        const newMessages = [...prev];
+                        newMessages[newMessages.length - 1].text = modelResponse + '...';
+                        return newMessages;
+                    });
+                }
+                
                 setMessages(prev => {
                     const newMessages = [...prev];
-                    newMessages[newMessages.length - 1].text = modelResponse + '...';
+                    newMessages[newMessages.length - 1].text = modelResponse;
                     return newMessages;
                 });
+                return;
             }
-            
-            setMessages(prev => {
-                const newMessages = [...prev];
-                newMessages[newMessages.length - 1].text = modelResponse;
-                return newMessages;
-            });
 
+            // Server-side chat fallback
+            const systemInstruction = t('chatbotSystemInstruction', { language: languageName });
+            const response = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    message: currentInput,
+                    systemInstruction,
+                    history: messages.map(m => ({ role: m.role, content: m.text })),
+                }),
+            });
+            if (response.ok) {
+                const data = await response.json();
+                setMessages(prev => [...prev, { role: 'model', text: data.text || '' }]);
+            } else {
+                throw new Error('Server chat endpoint returned ' + response.status);
+            }
         } catch (error) {
             console.error('Chatbot error:', error);
             setMessages(prev => [...prev, { role: 'model', text: t('chatbotGenericError') }]);

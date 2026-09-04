@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { LiveServerMessage, Modality, Blob, LiveSession } from '@google/genai';
+import { LiveServerMessage, Modality, Blob } from '@google/genai';
 import { TranscriptMessage, ScanResult } from '../types';
 import Icon from './Icon';
 import { ai } from '../services/geminiService';
@@ -72,7 +72,7 @@ const ScanResultVoiceAssistant: React.FC<ScanResultVoiceAssistantProps> = ({ isO
     const [status, setStatus] = useState<AssistantStatus>('OFFLINE');
     const [transcripts, setTranscripts] = useState<TranscriptMessage[]>([]);
     
-    const sessionPromiseRef = useRef<Promise<LiveSession> | null>(null);
+    const sessionPromiseRef = useRef<Promise<any> | null>(null);
     const inputAudioContextRef = useRef<AudioContext | null>(null);
     const outputAudioContextRef = useRef<AudioContext | null>(null);
     const streamRef = useRef<MediaStream | null>(null);

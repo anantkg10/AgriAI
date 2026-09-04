@@ -112,12 +112,34 @@ const fallbackFileReader = (file: File): Promise<{ inlineData: { data: string; m
 };
 
 export const analyzePlantImage = async (imageFile: File): Promise<ScanResult> => {
-    if (!ai) {
-        // Updated error message for hardcoded key scenario.
-        throw new Error("Gemini AI client is not initialized. The hardcoded API key may be invalid or missing.");
+    const imagePart = await fileToGenerativePart(imageFile);
+
+    // 1. First, attempt secure server-side API endpoint (works seamlessly in deployed Cloud Run and production)
+    try {
+        const response = await fetch('/api/analyze-plant', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                imageBase64: imagePart.inlineData.data,
+                mimeType: imagePart.inlineData.mimeType,
+            }),
+        });
+        if (response.ok) {
+            const data = await response.json();
+            if (data && data.diseaseName) {
+                return data as ScanResult;
+            }
+        } else {
+            console.warn('/api/analyze-plant returned status', response.status);
+        }
+    } catch (apiErr) {
+        console.warn('Server endpoint /api/analyze-plant not reachable, falling back to direct SDK:', apiErr);
     }
 
-    const imagePart = await fileToGenerativePart(imageFile);
+    // 2. Direct client-side SDK fallback
+    if (!ai) {
+        throw new Error("Gemini AI client is not initialized. The API key may be invalid or missing.");
+    }
     
     const prompt = `Analyze this image of a plant leaf/stem/fruit. You are a world-class plant pathologist AI.
     For data consistency and subsequent translation, it is critical that your entire response be in English.
@@ -205,8 +227,30 @@ export const translateScanResult = async (
     englishResult: ScanResult, 
     targetLanguageName: string
 ): Promise<ScanResult> => {
+    if (targetLanguageName.toLowerCase() === 'english') {
+        return englishResult;
+    }
+
+    // 1. Attempt server-side translation first
+    try {
+        const response = await fetch('/api/translate-result', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ englishResult, targetLanguageName }),
+        });
+        if (response.ok) {
+            const data = await response.json();
+            if (data && data.diseaseName) {
+                return data as ScanResult;
+            }
+        }
+    } catch (apiErr) {
+        console.warn('Server translation route not reachable, falling back to direct SDK:', apiErr);
+    }
+
+    // 2. Direct client-side SDK fallback
     if (!ai) {
-        throw new Error("Gemini AI client is not initialized. The API key may be invalid or missing.");
+        return englishResult;
     }
     
     const textToTranslate = {

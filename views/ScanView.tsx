@@ -51,7 +51,7 @@ const ScanView: React.FC<ScanViewProps> = ({ setView }) => {
   useEffect(() => {
     // Fix: Replaced NodeJS.Timeout with 'number' for browser compatibility.
     // The setInterval function in a browser environment returns a number, not a NodeJS.Timeout object.
-    let interval: number | undefined;
+    let interval: ReturnType<typeof setInterval> | undefined;
     if (isLoading) {
       const messages = [
         'scanLoading1',
@@ -117,60 +117,33 @@ const ScanView: React.FC<ScanViewProps> = ({ setView }) => {
   }, [englishScanResult, language, languageName]);
 
   useEffect(() => {
-    if (displayedResult && ai) {
-      try {
-        const initialContext = t('scanFollowupSystemInstruction', {
-            language: languageName,
-            scanResult: JSON.stringify(displayedResult)
-        });
+    if (displayedResult) {
+      const initialContext = t('scanFollowupSystemInstruction', {
+          language: languageName,
+          scanResult: JSON.stringify(displayedResult)
+      });
 
-        const newChat = ai.chats.create({
-            model: 'gemini-3.1-flash-lite',
-            config: {
-              systemInstruction: initialContext,
-              thinkingConfig: { thinkingBudget: 0 },
-            },
-        });
-        setFollowUpChat(newChat);
-        setFollowUpMessages([]); 
+      // Provide a clean initial greeting without sending an empty message to the API
+      setFollowUpMessages([{
+          role: 'model',
+          text: languageName.toLowerCase() === 'hindi'
+              ? `नमस्ते! मैं इस पौधे के निदान (${displayedResult.diseaseName}) के बारे में आपके सवालों के उत्तर देने के लिए तैयार हूँ। आप उपचार, रोकथाम या देखभाल के बारे में पूछ सकते हैं।`
+              : `Hello! I am your AI plant specialist. Feel free to ask me anything about this diagnosis (${displayedResult.diseaseName}), including treatment procedures, organic alternatives, or prevention.`
+      }]);
 
-        const getInitialMessage = async () => {
-            setIsReplying(true);
-            try {
-                const result: AsyncGenerator<GenerateContentResponse> = await newChat.sendMessageStream({ message: "" });
-                let modelResponse = '';
-                setFollowUpMessages(prev => [...prev, { role: 'model', text: '...' }]);
-
-                for await (const chunk of result) {
-                    modelResponse += chunk.text;
-                    setFollowUpMessages(prev => {
-                        const newMessages = [...prev];
-                        if (newMessages.length > 0) {
-                            newMessages[newMessages.length - 1].text = modelResponse + '...';
-                        }
-                        return newMessages;
-                    });
-                }
-                
-                setFollowUpMessages(prev => {
-                     const newMessages = [...prev];
-                     if (newMessages.length > 0) {
-                        newMessages[newMessages.length - 1].text = modelResponse;
-                     }
-                    return newMessages;
-                });
-            } catch (error) {
-                console.error('Initial greeting fetch error:', error);
-                setFollowUpMessages(prev => [...prev, { role: 'model', text: t('scanFollowupInitialError') }]);
-            } finally {
-                setIsReplying(false);
-            }
-        };
-        getInitialMessage();
-
-      } catch (error) {
-        console.error("Failed to initialize follow-up chat:", error);
-        setFollowUpMessages([{ role: 'model', text: t('scanFollowupInitError') }]);
+      if (ai) {
+        try {
+          const newChat = ai.chats.create({
+              model: 'gemini-3.1-flash-lite',
+              config: {
+                systemInstruction: initialContext,
+                thinkingConfig: { thinkingBudget: 0 },
+              },
+          });
+          setFollowUpChat(newChat);
+        } catch (error) {
+          console.warn("Could not create client chat session, will use server fallback:", error);
+        }
       }
     } else {
         setFollowUpChat(null);
@@ -183,7 +156,7 @@ const ScanView: React.FC<ScanViewProps> = ({ setView }) => {
   }, [followUpMessages]);
 
   const handleSendFollowUp = async () => {
-    if (!followUpInput.trim() || isReplying || !followUpChat) return;
+    if (!followUpInput.trim() || isReplying) return;
 
     const userMessage: TranscriptMessage = { role: 'user', text: followUpInput };
     setFollowUpMessages(prev => [...prev, userMessage]);
@@ -192,25 +165,52 @@ const ScanView: React.FC<ScanViewProps> = ({ setView }) => {
     setIsReplying(true);
 
     try {
-        const result: AsyncGenerator<GenerateContentResponse> = await followUpChat.sendMessageStream({ message: currentInput });
-        let modelResponse = '';
-        setFollowUpMessages(prev => [...prev, { role: 'model', text: '...' }]);
+        if (followUpChat) {
+            const result: AsyncGenerator<GenerateContentResponse> = await followUpChat.sendMessageStream({ message: currentInput });
+            let modelResponse = '';
+            setFollowUpMessages(prev => [...prev, { role: 'model', text: '...' }]);
 
-        for await (const chunk of result) {
-            modelResponse += chunk.text;
+            for await (const chunk of result) {
+                modelResponse += chunk.text;
+                setFollowUpMessages(prev => {
+                    const newMessages = [...prev];
+                    if (newMessages.length > 0) {
+                        newMessages[newMessages.length - 1].text = modelResponse + '...';
+                    }
+                    return newMessages;
+                });
+            }
+            
             setFollowUpMessages(prev => {
                 const newMessages = [...prev];
-                newMessages[newMessages.length - 1].text = modelResponse + '...';
+                if (newMessages.length > 0) {
+                    newMessages[newMessages.length - 1].text = modelResponse;
+                }
                 return newMessages;
             });
+            return;
         }
-        
-        setFollowUpMessages(prev => {
-            const newMessages = [...prev];
-            newMessages[newMessages.length - 1].text = modelResponse;
-            return newMessages;
-        });
 
+        // Server API fallback if direct chat is unavailable
+        const initialContext = t('scanFollowupSystemInstruction', {
+            language: languageName,
+            scanResult: JSON.stringify(displayedResult)
+        });
+        const res = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message: currentInput,
+                systemInstruction: initialContext,
+                history: followUpMessages.map(m => ({ role: m.role, content: m.text })),
+            }),
+        });
+        if (res.ok) {
+            const data = await res.json();
+            setFollowUpMessages(prev => [...prev, { role: 'model', text: data.text || '' }]);
+        } else {
+            throw new Error('Server chat route returned ' + res.status);
+        }
     } catch (error) {
         console.error('Follow-up chat error:', error);
         setFollowUpMessages(prev => [...prev, { role: 'model', text: t('scanFollowupGenericError') }]);
