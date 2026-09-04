@@ -125,9 +125,10 @@ const ScanView: React.FC<ScanViewProps> = ({ setView }) => {
         });
 
         const newChat = ai.chats.create({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-3.1-flash-lite',
             config: {
               systemInstruction: initialContext,
+              thinkingConfig: { thinkingBudget: 0 },
             },
         });
         setFollowUpChat(newChat);
@@ -242,26 +243,36 @@ const ScanView: React.FC<ScanViewProps> = ({ setView }) => {
     try {
       const result = await analyzePlantImage(imageFile);
       setEnglishScanResult(result);
+      // Immediately reveal diagnosis results to the user without blocking for secondary calls
+      setIsLoading(false);
 
-      const newHistoryItem: HistoryItem = {
-          ...result,
-          id: new Date().toISOString(),
-          date: new Date().toISOString(),
-          imagePreview: imagePreview,
-      };
-      const existingHistory: HistoryItem[] = JSON.parse(localStorage.getItem('scanHistory') || '[]');
-      const updatedHistory = [newHistoryItem, ...existingHistory].slice(0, 50); 
-      localStorage.setItem('scanHistory', JSON.stringify(updatedHistory));
+      try {
+        const newHistoryItem: HistoryItem = {
+            ...result,
+            id: new Date().toISOString(),
+            date: new Date().toISOString(),
+            imagePreview: imagePreview,
+        };
+        const existingHistory: HistoryItem[] = JSON.parse(localStorage.getItem('scanHistory') || '[]');
+        const updatedHistory = [newHistoryItem, ...existingHistory].slice(0, 50); 
+        localStorage.setItem('scanHistory', JSON.stringify(updatedHistory));
+      } catch (storageErr) {
+        console.warn('Could not save to localStorage:', storageErr);
+      }
 
-      // Get IDs using English articles for consistent matching with the English disease name
+      // Fetch related articles asynchronously in the background without holding up the screen
       const englishT = (key: string): string => translations['en'][key] || key;
       const allEnglishArticles = getArticles(englishT);
-      const ids = await findRelatedArticles(result.diseaseName, allEnglishArticles);
-      setRelatedArticleIds(ids);
+      findRelatedArticles(result.diseaseName, allEnglishArticles)
+        .then(ids => {
+          setRelatedArticleIds(ids);
+        })
+        .catch(err => {
+          console.warn("Could not load related articles:", err);
+        });
 
     } catch (err: any) {
       setError(err.message || t('scanErrorUnknown'));
-    } finally {
       setIsLoading(false);
     }
   };

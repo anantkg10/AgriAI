@@ -27,8 +27,11 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, setIsOpen }) => {
             try {
                 const systemInstruction = t('chatbotSystemInstruction', { language: languageName });
                 const newChat = ai.chats.create({
-                    model: 'gemini-2.5-flash',
-                    config: { systemInstruction },
+                    model: 'gemini-3.1-flash-lite',
+                    config: {
+                        systemInstruction,
+                        thinkingConfig: { thinkingBudget: 0 }
+                    },
                 });
                 chatRef.current = newChat;
                 setMessages([]);

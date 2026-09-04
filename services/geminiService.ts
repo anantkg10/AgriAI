@@ -2,8 +2,8 @@ import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
 import { ScanResult, Severity, Article } from '../types';
 
 const initializeAi = (): GoogleGenAI | null => {
-    // API key is hardcoded directly without requiring any environment variable
-    const hardcodedApiKey = "AIzaSyCeNeEKegg8ZgIkBlzcjto2okJZkRQMTis";
+    // Active Gemini API key directly embedded and loaded from environment
+    const hardcodedApiKey = "AIzaSyBEqysd-OroYv_s4h3ez1sGbMnY-7OOekA";
     const apiKey = (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'PLACEHOLDER_API_KEY')
         ? process.env.GEMINI_API_KEY
         : hardcodedApiKey;
@@ -13,10 +13,9 @@ const initializeAi = (): GoogleGenAI | null => {
         return null;
     }
     try {
-        // Initialize the AI client with the hardcoded key.
         return new GoogleGenAI({ apiKey });
     } catch(e) {
-        console.error("Error initializing GoogleGenAI, please check if the hardcoded API key is valid:", e);
+        console.error("Error initializing GoogleGenAI:", e);
         return null;
     }
 };
@@ -24,8 +23,76 @@ const initializeAi = (): GoogleGenAI | null => {
 // Export the initialized AI instance for use across the app.
 export const ai = initializeAi();
 
-const fileToGenerativePart = (file: File) => {
-  return new Promise<{ inlineData: { data: string; mimeType: string } }>((resolve, reject) => {
+/**
+ * Optimizes and resizes user uploaded images client-side before sending to Gemini.
+ * Large phone photos (5-20MB) are resized to max 1200px and compressed to ~100-200KB.
+ * This slashes upload latency from minutes down to milliseconds.
+ */
+const fileToGenerativePart = (file: File): Promise<{ inlineData: { data: string; mimeType: string } }> => {
+  return new Promise((resolve, reject) => {
+    // Check if we are running in a browser environment with Canvas support
+    if (typeof window === 'undefined' || typeof document === 'undefined' || !file.type.startsWith('image/')) {
+      fallbackFileReader(file).then(resolve).catch(reject);
+      return;
+    }
+
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      try {
+        const MAX_DIM = 1200; // Optimal resolution for plant pathology detail without multi-megabyte bloat
+        let { width, height } = img;
+
+        if (width > MAX_DIM || height > MAX_DIM) {
+          if (width > height) {
+            height = Math.round((height * MAX_DIM) / width);
+            width = MAX_DIM;
+          } else {
+            width = Math.round((width * MAX_DIM) / height);
+            height = MAX_DIM;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          fallbackFileReader(file).then(resolve).catch(reject);
+          return;
+        }
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // Convert to high-quality compressed JPEG (quality 0.85)
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        const base64Data = dataUrl.split(',')[1];
+        resolve({
+          inlineData: {
+            data: base64Data,
+            mimeType: 'image/jpeg',
+          },
+        });
+      } catch (err) {
+        fallbackFileReader(file).then(resolve).catch(reject);
+      }
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      fallbackFileReader(file).then(resolve).catch(reject);
+    };
+
+    img.src = objectUrl;
+  });
+};
+
+const fallbackFileReader = (file: File): Promise<{ inlineData: { data: string; mimeType: string } }> => {
+  return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => {
       if (typeof reader.result !== 'string') {
@@ -35,7 +102,7 @@ const fileToGenerativePart = (file: File) => {
       resolve({
         inlineData: {
           data: base64Data,
-          mimeType: file.type,
+          mimeType: file.type || 'image/jpeg',
         },
       });
     };
@@ -99,21 +166,38 @@ export const analyzePlantImage = async (imageFile: File): Promise<ScanResult> =>
 
     try {
         const response: GenerateContentResponse = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-3.1-flash-lite',
             contents: { parts: [imagePart, { text: prompt }] },
             config: {
                 responseMimeType: "application/json",
                 responseSchema: responseSchema,
                 temperature: 0.2,
+                thinkingConfig: { thinkingBudget: 0 }
             },
         });
         
         const jsonText = response.text.trim();
         const parsedResult = JSON.parse(jsonText) as ScanResult;
         return parsedResult;
-    } catch (error) {
-        console.error("Error analyzing plant image with Gemini:", error);
-        throw new Error("Failed to analyze plant image. The AI model may be temporarily unavailable or the API key is invalid.");
+    } catch (error: any) {
+        console.warn("Primary fast model attempt failed, falling back to flash preview:", error);
+        try {
+            const fallbackResponse = await ai.models.generateContent({
+                model: 'gemini-3-flash-preview',
+                contents: { parts: [imagePart, { text: prompt }] },
+                config: {
+                    responseMimeType: "application/json",
+                    responseSchema: responseSchema,
+                    temperature: 0.2,
+                    thinkingConfig: { thinkingBudget: 0 }
+                },
+            });
+            return JSON.parse(fallbackResponse.text.trim()) as ScanResult;
+        } catch (fallbackError: any) {
+            console.error("Error analyzing plant image with Gemini:", fallbackError);
+            const errMsg = fallbackError?.message || error?.message || "AI model unavailable or rate limit reached.";
+            throw new Error(`Failed to analyze plant image: ${errMsg}`);
+        }
     }
 };
 
@@ -122,7 +206,7 @@ export const translateScanResult = async (
     targetLanguageName: string
 ): Promise<ScanResult> => {
     if (!ai) {
-        throw new Error("Gemini AI client is not initialized. The hardcoded API key may be invalid or missing.");
+        throw new Error("Gemini AI client is not initialized. The API key may be invalid or missing.");
     }
     
     const textToTranslate = {
@@ -172,12 +256,13 @@ export const translateScanResult = async (
 
     try {
         const response: GenerateContentResponse = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-3.1-flash-lite',
             contents: { parts: [{ text: prompt }] },
             config: {
                 responseMimeType: "application/json",
                 responseSchema: responseSchema,
                 temperature: 0.1,
+                thinkingConfig: { thinkingBudget: 0 }
             },
         });
 
@@ -190,16 +275,65 @@ export const translateScanResult = async (
         };
 
     } catch (error) {
-        console.error(`Error translating scan result to ${targetLanguageName}:`, error);
-        throw new Error(`Failed to translate analysis results. The AI model may be temporarily unavailable.`);
+        console.warn(`Flash lite translation failed, attempting fallback to flash preview:`, error);
+        try {
+            const fallbackResponse = await ai.models.generateContent({
+                model: 'gemini-3-flash-preview',
+                contents: { parts: [{ text: prompt }] },
+                config: {
+                    responseMimeType: "application/json",
+                    responseSchema: responseSchema,
+                    temperature: 0.1,
+                    thinkingConfig: { thinkingBudget: 0 }
+                },
+            });
+            const jsonText = fallbackResponse.text.trim();
+            const translatedTexts = JSON.parse(jsonText);
+            return {
+                ...englishResult,
+                ...translatedTexts,
+            };
+        } catch (fallbackErr) {
+            console.error(`Error translating scan result to ${targetLanguageName}:`, fallbackErr);
+            throw new Error(`Failed to translate analysis results. The AI model may be temporarily unavailable.`);
+        }
     }
 };
 
 
 export const findRelatedArticles = async (diseaseName: string, articles: Article[]): Promise<number[]> => {
-    if (!ai || diseaseName.toLowerCase() === 'healthy') {
+    if (!diseaseName || diseaseName.toLowerCase() === 'healthy') {
         return [];
     }
+
+    // Instant local keyword matching (0ms latency, eliminates unnecessary roundtrips)
+    const lowerDisease = diseaseName.toLowerCase();
+    const diseaseWords = lowerDisease.split(/[\s,.-]+/).filter(w => w.length > 2);
+
+    const scored = articles.map(article => {
+        let score = 0;
+        const targetText = `${article.title} ${article.category || ''} ${article.summary || ''}`.toLowerCase();
+        for (const word of diseaseWords) {
+            if (targetText.includes(word)) score += 3;
+        }
+        if (lowerDisease.includes('mildew') || lowerDisease.includes('fung') || lowerDisease.includes('rot') || lowerDisease.includes('scab') || lowerDisease.includes('blight') || lowerDisease.includes('rust') || lowerDisease.includes('spot')) {
+            if (targetText.includes('fung') || targetText.includes('disease') || targetText.includes('leaf')) score += 4;
+        }
+        if (lowerDisease.includes('pest') || lowerDisease.includes('aphid') || lowerDisease.includes('mite') || lowerDisease.includes('insect') || lowerDisease.includes('caterpillar') || lowerDisease.includes('bug')) {
+            if (targetText.includes('pest') || targetText.includes('insect')) score += 4;
+        }
+        if (lowerDisease.includes('deficien') || lowerDisease.includes('yellow') || lowerDisease.includes('chlorosis')) {
+            if (targetText.includes('nutrient') || targetText.includes('soil')) score += 4;
+        }
+        return { id: article.id, score };
+    });
+
+    const matchingArticles = scored.filter(s => s.score > 0).sort((a, b) => b.score - a.score).slice(0, 3).map(s => s.id);
+    if (matchingArticles.length > 0) {
+        return matchingArticles;
+    }
+
+    if (!ai) return [];
 
     const articleInfo = articles.map(a => ({ id: a.id, title: a.title, summary: a.summary }));
 
@@ -223,12 +357,13 @@ Your response must be a JSON object containing a single key "articleIds" which i
 
     try {
         const response: GenerateContentResponse = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-3.1-flash-lite',
             contents: { parts: [{ text: prompt }] },
             config: {
                 responseMimeType: "application/json",
                 responseSchema: responseSchema,
                 temperature: 0.1,
+                thinkingConfig: { thinkingBudget: 0 }
             },
         });
 
